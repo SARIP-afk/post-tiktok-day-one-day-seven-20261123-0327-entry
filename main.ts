@@ -1,40 +1,60 @@
 // STAR DODGE — post-tiktok-day-one-day-seven entry program.
-// Reads VIDEO.json (the TikTok video carrying this entry's video) and prints a
-// deterministic summary. Standard library only, no network, no model calls.
+// Reads VIDEO.json (the TikTok video carrying this entry) and prints a
+// one-line JSON summary: entry id, game, video handle/id, play code and
+// whether the link parses as a TikTok video URL. Node stdlib only.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
-const VIDEO_PATH = join(ROOT, "VIDEO.json");
+const ENTRY_ID = "post-tiktok-day-one-day-seven-20261123-0327";
+const GAME_NAME = "STAR DODGE";
 const PLAY_CODE = "makefun-rocker-yarn-bramble";
-const REFERRAL_CODE = "cxyf1jsy";
-const VIDEO = "video.mp4"; // ~31 s, 1080x1920: title, day1 vs day7 split, CTA, referral end card
+const REFERRAL = "cxyf1jsy";
+const TIKTOK_VIDEO =
+  /^https?:\/\/(?:www\.)?tiktok\.com\/@([^/]+)\/video\/(\d+)(?:[/?].*)?$/;
+
+function loadVideoMeta(root: string): { url?: unknown } {
+  const text = readFileSync(join(root, "VIDEO.json"), "utf8");
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("VIDEO.json did not contain a JSON object");
+  }
+  return parsed as { url?: unknown };
+}
+
+function describeVideo(url: unknown) {
+  if (typeof url !== "string") return { url: "", handle: "", videoId: "", ok: false };
+  const found = url.match(TIKTOK_VIDEO);
+  return {
+    url,
+    handle: found ? found[1] : "",
+    videoId: found ? found[2] : "",
+    ok: found !== null,
+  };
+}
 
 function main(): void {
-  let video: unknown;
+  const root = dirname(fileURLToPath(import.meta.url));
+  let meta: { url?: unknown };
   try {
-    video = JSON.parse(readFileSync(VIDEO_PATH, "utf8"));
+    meta = loadVideoMeta(root);
   } catch (err) {
-    console.error("VIDEO.json is not readable JSON: " + (err as Error).message);
+    console.error("cannot read VIDEO.json: " + (err as Error).message);
     process.exit(1);
   }
-  const url = (video as { url?: unknown }).url;
-  const m = typeof url === "string"
-    ? url.match(/^https?:\/\/(?:www\.)?tiktok\.com\/@([^/]+)\/video\/(\d+)(?:[/?].*)?$/)
-    : null;
-  const out = {
-    entry: "post-tiktok-day-one-day-seven-20261123-0327",
-    game: "STAR DODGE",
-    url: typeof url === "string" ? url : "",
-    handle: m ? m[1] : "",
-    videoId: m ? m[2] : "",
+  const video = describeVideo(meta.url);
+  const summary = {
+    entry: ENTRY_ID,
+    game: GAME_NAME,
+    url: video.url,
+    handle: video.handle,
+    videoId: video.videoId,
     playCode: PLAY_CODE,
-    referralCode: REFERRAL_CODE,
-    video: VIDEO,
-    valid: m !== null,
+    referralCode: REFERRAL,
+    video: "video.mp4",
+    valid: video.ok,
   };
-  console.log(JSON.stringify(out));
+  console.log(JSON.stringify(summary));
 }
 
 main();

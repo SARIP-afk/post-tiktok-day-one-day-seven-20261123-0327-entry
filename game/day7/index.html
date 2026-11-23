@@ -2,296 +2,524 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>STAR DODGE — DAY 7: one week later</title>
+<title>STAR DODGE — Day 7</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  html, body { margin: 0; padding: 0; background: #12081f; height: 100%; overflow: hidden; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0d0618; }
   body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; width: 100vw; height: 100vh; object-fit: contain; background: #12081f; }
+  canvas { display: block; width: 100vw; height: 100vh; object-fit: contain; }
 </style>
 </head>
 <body>
-<canvas id="game" width="1280" height="720"></canvas>
+<canvas id="stage" width="1280" height="720"></canvas>
 <script>
 "use strict";
-// STAR DODGE — DAY 7 (enriched build, one week after day 1):
-// same one-prompt game, plus: faster + bigger meteors, shield power-up,
-// combo multiplier for consecutive stars, level-up every 30 s, magenta ship.
-// Controls: Arrow keys / A,D or mouse to move. R restarts after game over.
-// Add ?demo=1 to the URL and the ship flies itself (for recordings).
-const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
-const W = 1280, H = 720;
-const params = new URLSearchParams(location.search);
-const DEMO = params.get("demo") === "1";
+/*
+ * STAR DODGE — DAY 7
+ * Same one-prompt game, one week of daily upgrades later:
+ * bigger + faster rocks, a shield pickup that eats one hit, a combo
+ * multiplier for back-to-back stars (up to x3), a level-up every 30 s,
+ * and the ship repainted magenta.
+ * Move with ← → / A D, or the mouse. R restarts after game over.
+ * Add ?demo=1 to the URL and the ship steers itself.
+ */
+const stage = document.getElementById("stage");
+const paint = stage.getContext("2d");
+const ARENA_W = 1280;
+const ARENA_H = 720;
+const SHIP_ROW = 628;
+const SHIP_HALF = 30;
+const autoplay = new URLSearchParams(location.search).get("demo") === "1";
 
-const ship = { x: W / 2, y: 640, w: 56, h: 42, speed: 620 };
-let meteors = [], stars = [], shields = [], score = 0, lives = 3, over = false;
-let invuln = 0, elapsed = 0, meteorTimer = 0, starTimer = 0, shieldTimer = 6, last = 0;
-// day-7 systems
-let shield = false, shieldFlash = 0;
-let combo = 0, comboMult = 1, lastStarAt = -99;
-let level = 1, levelBanner = 0;
-const keys = {};
-const skyStars = [];
-for (let i = 0; i < 110; i++) {
-  skyStars.push({ x: Math.random() * W, y: Math.random() * H * 0.6, r: Math.random() * 1.6 + 0.4, tw: Math.random() * Math.PI * 2 });
-}
-const bg = ctx.createLinearGradient(0, 0, 0, H);
-bg.addColorStop(0, "#1b0f3a"); bg.addColorStop(0.45, "#5b1a5e");
-bg.addColorStop(0.75, "#c41c83"); bg.addColorStop(1, "#ff7a3d");
+// ---- state ---------------------------------------------------------------
+const ship = { x: ARENA_W / 2, speed: 640 };
+const state = {
+  rocks: [],
+  pickups: [],
+  guards: [],       // shield power-ups drifting down
+  points: 0,
+  hearts: 3,
+  finished: false,
+  grace: 0,         // seconds of post-hit blinking
+  clock: 0,
+  rockClock: 0,
+  starClock: 0.4,
+  guardClock: 6,    // first shield shows up a few seconds in
+  prevStamp: 0,
+  // day-7 systems
+  shieldUp: false,
+  shieldPop: 0,     // ring flash right after the shield absorbs a hit
+  streak: 0,        // stars in a row without a gap
+  streakAt: -99,    // clock time of the last star
+  mult: 1,          // combo multiplier, 1..3
+  level: 1,
+  levelToast: 0,    // seconds left showing the LEVEL UP banner
+};
+const held = {};
 
-addEventListener("keydown", (e) => {
-  keys[e.key] = true;
-  if ((e.key === "r" || e.key === "R") && over) reset();
-  if (e.key === " " || e.key.startsWith("Arrow")) e.preventDefault();
-});
-addEventListener("keyup", (e) => { keys[e.key] = false; });
-addEventListener("mousemove", (e) => {
-  const r = canvas.getBoundingClientRect();
-  ship.x = (e.clientX - r.left) * (W / r.width);
-});
+// ---- backdrop ------------------------------------------------------------
+const dusk = paint.createLinearGradient(0, 0, 0, ARENA_H);
+dusk.addColorStop(0.0, "#160a33");
+dusk.addColorStop(0.5, "#4d1660");
+dusk.addColorStop(0.8, "#b81e7e");
+dusk.addColorStop(1.0, "#ff8a3c");
 
-function reset() {
-  meteors = []; stars = []; shields = []; score = 0; lives = 3; over = false;
-  invuln = 0; elapsed = 0; meteorTimer = 0; starTimer = 0; shieldTimer = 6;
-  shield = false; shieldFlash = 0; combo = 0; comboMult = 1; lastStarAt = -99;
-  level = 1; levelBanner = 0;
-  ship.x = W / 2;
-}
-
-function spawnMeteor() {
-  meteors.push({
-    x: 40 + Math.random() * (W - 80),
-    y: -30, r: 20 + Math.random() * 26, // day 7: bigger rocks (day 1: 14 + 18)
-    vy: 190 + Math.random() * 140 + elapsed * 6 + (level - 1) * 30, // day 7: faster
-    vx: (Math.random() - 0.5) * 70, rot: Math.random() * Math.PI * 2,
-    vr: (Math.random() - 0.5) * 2.4
+const specks = [];
+for (let i = 0; i < 130; i++) {
+  specks.push({
+    x: Math.random() * ARENA_W,
+    y: Math.random() * ARENA_H * 0.55,
+    size: 0.5 + Math.random() * 1.7,
+    phase: Math.random() * Math.PI * 2,
   });
 }
-function spawnStar() {
-  stars.push({ x: 40 + Math.random() * (W - 80), y: -20, r: 13, vy: 120 + Math.random() * 60, rot: 0 });
-}
-function spawnShield() {
-  shields.push({ x: 60 + Math.random() * (W - 120), y: -24, r: 16, vy: 85, rot: 0 }); // slow fall: easy to catch
-}
-function dist2(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy; }
 
-function demoAI(dt) {
-  // Pick the safest nearby x: score candidate positions by meteor danger,
-  // then by distance to the nearest falling star or shield. Recomputed every frame.
-  // Day 7: longer lookahead (faster meteors), finer candidate grid, shields are
-  // worth chasing, and only targets still above the ship's row are catchable.
-  const cands = [ship.x, ship.x - 85, ship.x + 85, ship.x - 170, ship.x + 170,
-    ship.x - 255, ship.x + 255, ship.x - 340, ship.x + 340]
-    .map((x) => Math.max(30, Math.min(W - 30, x)));
-  let bestX = ship.x, bestCost = Infinity;
-  for (const x of cands) {
-    let danger = 0;
-    for (const m of meteors) {
-      if (m.y >= ship.y || m.vy <= 0) continue;
-      const t = (ship.y - m.y) / m.vy; // seconds until it reaches the ship's row
-      if (t < 0 || t > 1.8) continue;
-      const mx = m.x + m.vx * t; // where it will be then
-      const gap = Math.abs(mx - x) - (m.r + 30);
-      if (gap < 0) danger += (1.8 - t) * 12 - gap * 0.05;
-    }
-    let targetD = 0;
-    // day 7: shields are worth chasing first — they keep the ship alive
-    const pool = (shields.length ? shields : stars).filter((s) => s.y < ship.y - 10);
-    if (pool.length) {
-      let best = pool[0];
-      for (const s of pool) if (s.y > best.y) best = s;
-      targetD = Math.abs(best.x - x) / W;
-    }
-    const cost = danger * 10 + targetD;
-    if (cost < bestCost) { bestCost = cost; bestX = x; }
+// ---- input ---------------------------------------------------------------
+addEventListener("keydown", (ev) => {
+  held[ev.key] = true;
+  if (state.finished && (ev.key === "r" || ev.key === "R")) restart();
+  if (ev.key === " " || ev.key.indexOf("Arrow") === 0) ev.preventDefault();
+});
+addEventListener("keyup", (ev) => { held[ev.key] = false; });
+addEventListener("mousemove", (ev) => {
+  const box = stage.getBoundingClientRect();
+  ship.x = ((ev.clientX - box.left) / box.width) * ARENA_W;
+});
+
+// ---- spawners ------------------------------------------------------------
+function restart() {
+  state.rocks = [];
+  state.pickups = [];
+  state.guards = [];
+  state.points = 0;
+  state.hearts = 3;
+  state.finished = false;
+  state.grace = 0;
+  state.clock = 0;
+  state.rockClock = 0;
+  state.starClock = 0.4;
+  state.guardClock = 6;
+  state.shieldUp = false;
+  state.shieldPop = 0;
+  state.streak = 0;
+  state.streakAt = -99;
+  state.mult = 1;
+  state.level = 1;
+  state.levelToast = 0;
+  ship.x = ARENA_W / 2;
+}
+
+function dropRock() {
+  // Day 7: rocks are bigger and fall faster, and each level adds speed.
+  state.rocks.push({
+    x: 50 + Math.random() * (ARENA_W - 100),
+    y: -36,
+    radius: 20 + Math.random() * 26,
+    fall: 190 + Math.random() * 140 + state.clock * 6 + (state.level - 1) * 30,
+    drift: (Math.random() - 0.5) * 70,
+    spin: Math.random() * Math.PI * 2,
+    spinRate: (Math.random() - 0.5) * 2.2,
+    bumps: Array.from({ length: 9 }, () => 0.82 + Math.random() * 0.36),
+  });
+}
+
+function dropStar() {
+  state.pickups.push({
+    x: 50 + Math.random() * (ARENA_W - 100),
+    y: -22,
+    radius: 13,
+    fall: 115 + Math.random() * 65,
+    spin: 0,
+  });
+}
+
+function dropGuard() {
+  // Shield pickup: falls slowly so it is easy to catch on purpose.
+  state.guards.push({
+    x: 70 + Math.random() * (ARENA_W - 140),
+    y: -26,
+    radius: 16,
+    fall: 85,
+    spin: 0,
+  });
+}
+
+function gap(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
+// ---- autopilot (demo mode) -----------------------------------------------
+function steerSelf(dt) {
+  // Same trajectory-aware idea as day 1: for every landing spot, work
+  // out when the first rock would catch the ship on the way there, and
+  // take the spot with the latest first hit. Shields are worth chasing
+  // first — they keep the ship alive — then stars.
+  const slots = [];
+  for (let off = -340; off <= 340; off += 85) {
+    slots.push(Math.max(SHIP_HALF, Math.min(ARENA_W - SHIP_HALF, ship.x + off)));
   }
-  const dx = bestX - ship.x;
-  ship.x += Math.max(-ship.speed * dt, Math.min(ship.speed * dt, dx));
+  let choice = ship.x;
+  let bestScore = -Infinity;
+  for (const spot of slots) {
+    let survive = 2.5;
+    for (const rock of state.rocks) {
+      if (rock.y >= SHIP_ROW || rock.fall <= 0) continue;
+      const eta = (SHIP_ROW - rock.y) / rock.fall;
+      if (eta < 0 || eta > 2.5) continue;
+      const rockX = rock.x + rock.drift * eta;
+      const shift = Math.max(-ship.speed * eta, Math.min(ship.speed * eta, spot - ship.x));
+      if (Math.abs(rockX - (ship.x + shift)) < rock.radius + 28) {
+        survive = Math.min(survive, eta);
+      }
+    }
+    // Only the next ~1.6 s of danger matters: beyond that every spot is
+    // equally safe, so the ship is free to chase its target.
+    const safety = Math.min(survive, 1.6) * 10;
+    let pull = 0;
+    const pool = state.guards.length ? state.guards : state.pickups;
+    const reachable = pool.filter((item) => {
+      if (item.y >= SHIP_ROW - 40) return false;
+      const timeLeft = (SHIP_ROW - item.y) / item.fall;
+      const travel = Math.max(0, Math.abs(item.x - ship.x) - 20) / ship.speed;
+      return timeLeft >= travel;
+    });
+    if (reachable.length) {
+      let lowest = reachable[0];
+      for (const item of reachable) if (item.y > lowest.y) lowest = item;
+      pull = (Math.abs(lowest.x - spot) / ARENA_W) * 3;
+    }
+    const wander = (Math.abs(spot - ship.x) / ARENA_W) * 0.5;
+    const score = safety - pull - wander;
+    if (score > bestScore) { bestScore = score; choice = spot; }
+  }
+  const shift = choice - ship.x;
+  ship.x += Math.max(-ship.speed * dt, Math.min(ship.speed * dt, shift));
 }
 
-function update(dt) {
-  if (over) return;
-  elapsed += dt;
-  if (invuln > 0) invuln -= dt;
-  if (shieldFlash > 0) shieldFlash -= dt;
-  if (levelBanner > 0) levelBanner -= dt;
-  // level-up every 30 s
-  const newLevel = Math.floor(elapsed / 30) + 1;
-  if (newLevel > level) { level = newLevel; levelBanner = 2.2; }
-  // combo decays after 2 s without a star
-  if (combo > 0 && elapsed - lastStarAt > 2) { combo = 0; comboMult = 1; }
-  if (DEMO) demoAI(dt);
+// ---- simulation ----------------------------------------------------------
+function step(dt) {
+  if (state.finished) return;
+  state.clock += dt;
+  if (state.grace > 0) state.grace -= dt;
+  if (state.shieldPop > 0) state.shieldPop -= dt;
+  if (state.levelToast > 0) state.levelToast -= dt;
+
+  // Level-up every 30 s: the banner shows and the rocks get faster.
+  const reached = Math.floor(state.clock / 30) + 1;
+  if (reached > state.level) {
+    state.level = reached;
+    state.levelToast = 2.2;
+  }
+  // The combo fades if more than 2 s pass without a star.
+  if (state.streak > 0 && state.clock - state.streakAt > 2) {
+    state.streak = 0;
+    state.mult = 1;
+  }
+
+  if (autoplay) steerSelf(dt);
   else {
-    if (keys.ArrowLeft || keys.a || keys.A) ship.x -= ship.speed * dt;
-    if (keys.ArrowRight || keys.d || keys.D) ship.x += ship.speed * dt;
+    if (held.ArrowLeft || held.a || held.A) ship.x -= ship.speed * dt;
+    if (held.ArrowRight || held.d || held.D) ship.x += ship.speed * dt;
   }
-  ship.x = Math.max(30, Math.min(W - 30, ship.x));
-  meteorTimer -= dt; starTimer -= dt; shieldTimer -= dt;
-  if (meteorTimer <= 0) { spawnMeteor(); meteorTimer = Math.max(0.28, 0.65 - elapsed * 0.009); }
-  if (starTimer <= 0) { spawnStar(); starTimer = 0.75; } // day 7: denser stars feed the combo
-  if (shieldTimer <= 0) { spawnShield(); shieldTimer = 7 + Math.random() * 3; }
-  for (const m of meteors) { m.y += m.vy * dt; m.x += m.vx * dt; m.rot += m.vr * dt; }
-  for (const s of stars) { s.y += s.vy * dt; s.rot += dt * 2; }
-  for (const s of shields) { s.y += s.vy * dt; s.rot += dt * 1.5; }
-  meteors = meteors.filter((m) => m.y < H + 60);
-  stars = stars.filter((s) => s.y < H + 40);
-  shields = shields.filter((s) => s.y < H + 40);
-  // shield pickup (generous radius so the demo reliably shows the ring)
-  for (const s of shields) {
-    if (dist2(s, ship) < (s.r + 34) * (s.r + 34)) { shield = true; s.y = H + 999; }
+  ship.x = Math.max(SHIP_HALF, Math.min(ARENA_W - SHIP_HALF, ship.x));
+
+  state.rockClock -= dt;
+  state.starClock -= dt;
+  state.guardClock -= dt;
+  if (state.rockClock <= 0) {
+    dropRock();
+    state.rockClock = Math.max(0.28, 0.65 - state.clock * 0.009);
   }
-  shields = shields.filter((s) => s.y < H + 40);
-  // star pickup: consecutive stars within 2 s raise the combo multiplier (max x3)
-  for (const s of stars) {
-    if (dist2(s, ship) < (s.r + 26) * (s.r + 26)) {
-      if (elapsed - lastStarAt <= 2) combo++; else combo = 1;
-      comboMult = Math.min(3, combo);
-      lastStarAt = elapsed;
-      score += 10 * comboMult; s.y = H + 999;
+  if (state.starClock <= 0) {
+    dropStar();
+    state.starClock = 0.75; // denser stars feed the combo
+  }
+  if (state.guardClock <= 0) {
+    dropGuard();
+    state.guardClock = 7 + Math.random() * 3;
+  }
+
+  for (const rock of state.rocks) {
+    rock.y += rock.fall * dt;
+    rock.x += rock.drift * dt;
+    rock.spin += rock.spinRate * dt;
+  }
+  for (const star of state.pickups) {
+    star.y += star.fall * dt;
+    star.spin += dt * 2.2;
+  }
+  for (const guard of state.guards) {
+    guard.y += guard.fall * dt;
+    guard.spin += dt * 1.5;
+  }
+  state.rocks = state.rocks.filter((rock) => rock.y < ARENA_H + 70);
+  state.pickups = state.pickups.filter((star) => star.y < ARENA_H + 50);
+  state.guards = state.guards.filter((guard) => guard.y < ARENA_H + 50);
+
+  const shipPoint = { x: ship.x, y: SHIP_ROW };
+
+  // Shield pickup — wide catch radius so the demo reliably shows the ring.
+  for (const guard of state.guards) {
+    if (gap(guard, shipPoint) < (guard.radius + 34) * (guard.radius + 34)) {
+      state.shieldUp = true;
+      guard.y = ARENA_H + 999;
     }
   }
-  stars = stars.filter((s) => s.y < H + 40);
-  if (invuln <= 0) {
-    for (const m of meteors) {
-      if (dist2(m, ship) < (m.r + 24) * (m.r + 24)) {
-        m.y = H + 999;
-        if (shield) { shield = false; shieldFlash = 0.6; invuln = 1.2; } // shield absorbs the hit
-        else {
-          lives--; invuln = 1.6;
-          if (lives <= 0) over = true;
+  state.guards = state.guards.filter((guard) => guard.y < ARENA_H + 50);
+
+  // Star pickup — stars within 2 s of each other build the combo (max x3).
+  for (const star of state.pickups) {
+    if (gap(star, shipPoint) < (star.radius + 26) * (star.radius + 26)) {
+      if (state.clock - state.streakAt <= 2) state.streak += 1;
+      else state.streak = 1;
+      state.mult = Math.min(3, state.streak);
+      state.streakAt = state.clock;
+      state.points += 10 * state.mult;
+      star.y = ARENA_H + 999;
+    }
+  }
+  state.pickups = state.pickups.filter((star) => star.y < ARENA_H + 50);
+
+  if (state.grace <= 0) {
+    for (const rock of state.rocks) {
+      if (gap(rock, shipPoint) < (rock.radius + 24) * (rock.radius + 24)) {
+        rock.y = ARENA_H + 999;
+        if (state.shieldUp) {
+          // The shield eats the hit instead of a heart.
+          state.shieldUp = false;
+          state.shieldPop = 0.6;
+          state.grace = 1.2;
+        } else {
+          state.hearts -= 1;
+          state.grace = 1.6;
+          if (state.hearts <= 0) state.finished = true;
         }
         break;
       }
     }
   }
-  meteors = meteors.filter((m) => m.y < H + 60);
+  state.rocks = state.rocks.filter((rock) => rock.y < ARENA_H + 70);
 }
 
-function drawStar(x, y, r, rot, color) {
-  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
-  ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 14;
-  ctx.beginPath();
+// ---- drawing -------------------------------------------------------------
+function drawSparkle(x, y, radius, angle, colour) {
+  paint.save();
+  paint.translate(x, y);
+  paint.rotate(angle);
+  paint.fillStyle = colour;
+  paint.shadowColor = colour;
+  paint.shadowBlur = 14;
+  paint.beginPath();
   for (let i = 0; i < 8; i++) {
-    const rr = i % 2 === 0 ? r : r * 0.45;
+    const r = i % 2 === 0 ? radius : radius * 0.45;
     const a = (i * Math.PI) / 4 - Math.PI / 2;
-    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(a) * rr, Math.sin(a) * rr);
+    if (i === 0) paint.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else paint.lineTo(Math.cos(a) * r, Math.sin(a) * r);
   }
-  ctx.closePath(); ctx.fill(); ctx.restore();
+  paint.closePath();
+  paint.fill();
+  paint.restore();
 }
-function drawMeteor(m) {
-  ctx.save(); ctx.translate(m.x, m.y); ctx.rotate(m.rot);
-  ctx.fillStyle = "#3d2b2b"; ctx.strokeStyle = "#ff7a3d"; ctx.lineWidth = 3;
-  ctx.shadowColor = "#ff7a3d"; ctx.shadowBlur = 16;
-  ctx.beginPath();
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    const rr = m.r * (0.85 + 0.3 * Math.sin(i * 2.7));
-    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(a) * rr, Math.sin(a) * rr);
+
+function drawRock(rock) {
+  paint.save();
+  paint.translate(rock.x, rock.y);
+  paint.rotate(rock.spin);
+  paint.fillStyle = "#3a2727";
+  paint.strokeStyle = "#ff7a3d";
+  paint.lineWidth = 3;
+  paint.shadowColor = "#ff7a3d";
+  paint.shadowBlur = 16;
+  paint.beginPath();
+  for (let i = 0; i < rock.bumps.length; i++) {
+    const a = (i / rock.bumps.length) * Math.PI * 2;
+    const r = rock.radius * rock.bumps[i];
+    if (i === 0) paint.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else paint.lineTo(Math.cos(a) * r, Math.sin(a) * r);
   }
-  ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  paint.closePath();
+  paint.fill();
+  paint.stroke();
+  paint.restore();
 }
-function drawShieldItem(s) {
-  ctx.save(); ctx.translate(s.x, s.y);
-  ctx.fillStyle = "#35d0ff"; ctx.strokeStyle = "#dffaff"; ctx.lineWidth = 3;
-  ctx.shadowColor = "#35d0ff"; ctx.shadowBlur = 18;
-  ctx.beginPath();
-  ctx.moveTo(0, -16); ctx.lineTo(13, -9); ctx.lineTo(13, 2);
-  ctx.quadraticCurveTo(13, 12, 0, 17); ctx.quadraticCurveTo(-13, 12, -13, 2);
-  ctx.lineTo(-13, -9); ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.restore();
+
+function drawGuard(guard) {
+  paint.save();
+  paint.translate(guard.x, guard.y);
+  paint.rotate(guard.spin);
+  paint.fillStyle = "#35d0ff";
+  paint.strokeStyle = "#dffaff";
+  paint.lineWidth = 3;
+  paint.shadowColor = "#35d0ff";
+  paint.shadowBlur = 18;
+  paint.beginPath();
+  paint.moveTo(0, -16);
+  paint.lineTo(13, -9);
+  paint.lineTo(13, 2);
+  paint.quadraticCurveTo(13, 12, 0, 17);
+  paint.quadraticCurveTo(-13, 12, -13, 2);
+  paint.lineTo(-13, -9);
+  paint.closePath();
+  paint.fill();
+  paint.stroke();
+  paint.restore();
 }
-function drawShip() {
-  if (invuln > 0 && Math.floor(invuln * 12) % 2 === 0) return; // blink while invulnerable
-  ctx.save(); ctx.translate(ship.x, ship.y);
-  // shield ring while active
-  if (shield) {
-    ctx.strokeStyle = "#35d0ff"; ctx.lineWidth = 3.5;
-    ctx.shadowColor = "#35d0ff"; ctx.shadowBlur = 20;
-    ctx.beginPath(); ctx.arc(0, 0, 46, 0, Math.PI * 2); ctx.stroke();
+
+function drawPlayer() {
+  // Blink while the post-hit grace period is running.
+  if (state.grace > 0 && Math.floor(state.grace * 12) % 2 === 0) return;
+  paint.save();
+  paint.translate(ship.x, SHIP_ROW);
+  // Shield ring while it is armed.
+  if (state.shieldUp) {
+    paint.strokeStyle = "#35d0ff";
+    paint.lineWidth = 3.5;
+    paint.shadowColor = "#35d0ff";
+    paint.shadowBlur = 20;
+    paint.beginPath();
+    paint.arc(0, 0, 46, 0, Math.PI * 2);
+    paint.stroke();
   }
-  if (shieldFlash > 0) {
-    ctx.strokeStyle = "rgba(53,208,255," + (shieldFlash / 0.6) + ")";
-    ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.arc(0, 0, 46 + (0.6 - shieldFlash) * 90, 0, Math.PI * 2); ctx.stroke();
+  // Expanding ring the moment the shield absorbs a hit.
+  if (state.shieldPop > 0) {
+    paint.strokeStyle = "rgba(53,208,255," + (state.shieldPop / 0.6) + ")";
+    paint.lineWidth = 5;
+    paint.beginPath();
+    paint.arc(0, 0, 46 + (0.6 - state.shieldPop) * 90, 0, Math.PI * 2);
+    paint.stroke();
   }
-  // day 7: magenta ship (day 1 was cyan)
-  ctx.fillStyle = "#ff2ea6"; ctx.strokeStyle = "#ffe8f6"; ctx.lineWidth = 2.5;
-  ctx.shadowColor = "#ff2ea6"; ctx.shadowBlur = 22;
-  ctx.beginPath();
-  ctx.moveTo(0, -24); ctx.lineTo(24, 18); ctx.lineTo(8, 12); ctx.lineTo(0, 20);
-  ctx.lineTo(-8, 12); ctx.lineTo(-24, 18); ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  ctx.fillStyle = "#22e6ff";
-  ctx.beginPath(); ctx.arc(0, -4, 6, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
+  // Day 7: magenta ship (day 1 was cyan).
+  paint.fillStyle = "#ff2ea6";
+  paint.strokeStyle = "#ffe8f6";
+  paint.lineWidth = 2.5;
+  paint.shadowColor = "#ff2ea6";
+  paint.shadowBlur = 22;
+  paint.beginPath();
+  paint.moveTo(0, -26);
+  paint.lineTo(14, 2);
+  paint.lineTo(28, 20);
+  paint.lineTo(10, 14);
+  paint.lineTo(0, 22);
+  paint.lineTo(-10, 14);
+  paint.lineTo(-28, 20);
+  paint.lineTo(-14, 2);
+  paint.closePath();
+  paint.fill();
+  paint.stroke();
+  // cockpit
+  paint.fillStyle = "#22e6ff";
+  paint.beginPath();
+  paint.arc(0, -6, 6.5, 0, Math.PI * 2);
+  paint.fill();
+  // engine glow
+  paint.fillStyle = "#ffd94d";
+  paint.shadowColor = "#ffd94d";
+  paint.shadowBlur = 12;
+  paint.beginPath();
+  paint.moveTo(-6, 22);
+  paint.lineTo(0, 34 + Math.random() * 6);
+  paint.lineTo(6, 22);
+  paint.closePath();
+  paint.fill();
+  paint.restore();
 }
-function draw() {
-  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-  for (const s of skyStars) {
-    ctx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(elapsed * 1.5 + s.tw));
-    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+
+function render() {
+  paint.fillStyle = dusk;
+  paint.fillRect(0, 0, ARENA_W, ARENA_H);
+
+  for (const speck of specks) {
+    paint.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(state.clock * 1.4 + speck.phase));
+    paint.fillStyle = "#ffffff";
+    paint.beginPath();
+    paint.arc(speck.x, speck.y, speck.size, 0, Math.PI * 2);
+    paint.fill();
   }
-  ctx.globalAlpha = 1;
-  // horizon glow
-  const glow = ctx.createRadialGradient(W / 2, H, 40, W / 2, H, 620);
-  glow.addColorStop(0, "rgba(255,150,60,0.55)"); glow.addColorStop(1, "rgba(255,150,60,0)");
-  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
-  for (const s of stars) drawStar(s.x, s.y, s.r, s.rot, "#ffd94d");
-  for (const s of shields) drawShieldItem(s);
-  for (const m of meteors) drawMeteor(m);
-  drawShip();
+  paint.globalAlpha = 1;
+
+  // warm glow hugging the bottom edge
+  const horizon = paint.createRadialGradient(ARENA_W / 2, ARENA_H, 30, ARENA_W / 2, ARENA_H, 640);
+  horizon.addColorStop(0, "rgba(255,150,60,0.5)");
+  horizon.addColorStop(1, "rgba(255,150,60,0)");
+  paint.fillStyle = horizon;
+  paint.fillRect(0, 0, ARENA_W, ARENA_H);
+
+  for (const star of state.pickups) drawSparkle(star.x, star.y, star.radius, star.spin, "#ffd94d");
+  for (const guard of state.guards) drawGuard(guard);
+  for (const rock of state.rocks) drawRock(rock);
+  drawPlayer();
+
   // HUD
-  ctx.fillStyle = "#fff"; ctx.font = "bold 30px system-ui, sans-serif";
-  ctx.textAlign = "left"; ctx.fillText("SCORE " + score, 24, 46);
-  if (comboMult > 1) {
-    ctx.fillStyle = "#ffd94d"; ctx.font = "bold 26px system-ui, sans-serif";
-    ctx.fillText("COMBO x" + comboMult, 24, 80);
+  paint.fillStyle = "#ffffff";
+  paint.font = "bold 30px system-ui, sans-serif";
+  paint.textAlign = "left";
+  paint.fillText("SCORE " + state.points, 24, 46);
+  if (state.mult > 1) {
+    paint.fillStyle = "#ffd94d";
+    paint.font = "bold 26px system-ui, sans-serif";
+    paint.fillText("COMBO x" + state.mult, 24, 80);
   }
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#ff5ea8";
-  ctx.font = "bold 30px system-ui, sans-serif";
-  ctx.fillText("♥".repeat(Math.max(0, lives)) + "♡".repeat(Math.max(0, 3 - lives)), W - 24, 46);
-  ctx.fillStyle = shield ? "#35d0ff" : "rgba(255,255,255,0.45)";
-  ctx.font = "bold 22px system-ui, sans-serif";
-  ctx.fillText(shield ? "⬢ SHIELD" : "○ SHIELD", W - 24, 80);
-  ctx.textAlign = "center"; ctx.fillStyle = "rgba(255,255,255,0.75)";
-  ctx.font = "600 20px system-ui, sans-serif";
-  ctx.fillText("STAR DODGE — DAY 7 · LV " + level, W / 2, 44);
-  if (levelBanner > 0) {
-    ctx.globalAlpha = Math.min(1, levelBanner);
-    ctx.fillStyle = "#fff"; ctx.font = "bold 72px system-ui, sans-serif";
-    ctx.shadowColor = "#ff2ea6"; ctx.shadowBlur = 30;
-    ctx.fillText("LEVEL UP", W / 2, H / 2 - 30);
-    ctx.shadowBlur = 0;
-    ctx.font = "32px system-ui, sans-serif";
-    ctx.fillStyle = "#ffe9a8";
-    ctx.fillText("LEVEL " + level + " — meteors faster!", W / 2, H / 2 + 30);
-    ctx.globalAlpha = 1;
+  paint.textAlign = "right";
+  paint.fillStyle = "#ff5ea8";
+  paint.font = "bold 30px system-ui, sans-serif";
+  paint.fillText("♥".repeat(Math.max(0, state.hearts)) + "♡".repeat(Math.max(0, 3 - state.hearts)), ARENA_W - 24, 46);
+  paint.fillStyle = state.shieldUp ? "#35d0ff" : "rgba(255,255,255,0.45)";
+  paint.font = "bold 22px system-ui, sans-serif";
+  paint.fillText(state.shieldUp ? "⬢ SHIELD" : "○ SHIELD", ARENA_W - 24, 80);
+  paint.textAlign = "center";
+  paint.fillStyle = "rgba(255,255,255,0.75)";
+  paint.font = "600 20px system-ui, sans-serif";
+  paint.fillText("STAR DODGE — DAY 7 · LV " + state.level, ARENA_W / 2, 44);
+
+  if (state.levelToast > 0) {
+    paint.globalAlpha = Math.min(1, state.levelToast);
+    paint.fillStyle = "#ffffff";
+    paint.font = "bold 72px system-ui, sans-serif";
+    paint.shadowColor = "#ff2ea6";
+    paint.shadowBlur = 30;
+    paint.fillText("LEVEL UP", ARENA_W / 2, ARENA_H / 2 - 30);
+    paint.shadowBlur = 0;
+    paint.font = "32px system-ui, sans-serif";
+    paint.fillStyle = "#ffe9a8";
+    paint.fillText("LEVEL " + state.level + " — meteors faster!", ARENA_W / 2, ARENA_H / 2 + 30);
+    paint.globalAlpha = 1;
   }
-  if (over) {
-    ctx.fillStyle = "rgba(10,4,24,0.72)"; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#fff"; ctx.font = "bold 64px system-ui, sans-serif";
-    ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
-    ctx.font = "32px system-ui, sans-serif";
-    ctx.fillText("Score: " + score + "  —  press R to play again", W / 2, H / 2 + 40);
+
+  if (state.finished) {
+    paint.fillStyle = "rgba(10,4,24,0.72)";
+    paint.fillRect(0, 0, ARENA_W, ARENA_H);
+    paint.fillStyle = "#ffffff";
+    paint.font = "bold 64px system-ui, sans-serif";
+    paint.fillText("GAME OVER", ARENA_W / 2, ARENA_H / 2 - 20);
+    paint.font = "32px system-ui, sans-serif";
+    paint.fillText("Score: " + state.points + "  —  press R to play again", ARENA_W / 2, ARENA_H / 2 + 40);
   }
 }
-function frame(t) {
-  const dt = Math.min(0.05, (t - last) / 1000 || 0.016);
-  last = t;
-  update(dt); draw();
-  requestAnimationFrame(frame);
+
+function loop(stamp) {
+  const dt = Math.min(0.05, (stamp - state.prevStamp) / 1000 || 0.016);
+  state.prevStamp = stamp;
+  step(dt);
+  render();
+  requestAnimationFrame(loop);
 }
+
 window.__game = {
-  get score() { return score; }, get lives() { return lives; },
-  get over() { return over; }, get elapsed() { return elapsed; },
-  get level() { return level; }, get combo() { return comboMult; },
-  get shield() { return shield; }
+  get score() { return state.points; },
+  get lives() { return state.hearts; },
+  get over() { return state.finished; },
+  get elapsed() { return state.clock; },
+  get level() { return state.level; },
+  get combo() { return state.mult; },
+  get shield() { return state.shieldUp; },
+  get rocks() { return state.rocks.length; },
+  get stars() { return state.pickups.length; },
+  get shipX() { return ship.x; },
 };
-reset();
-requestAnimationFrame(frame);
+restart();
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
